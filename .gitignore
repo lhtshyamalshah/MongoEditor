@@ -1,0 +1,12 @@
+node_modules/
+.npm-cache/
+.next/
+out/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.tsbuildinfo
+*.log
+*.pem
