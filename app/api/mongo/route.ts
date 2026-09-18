@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, collections, connect, databases, disconnect, documents, mutate, object, profileNames, publicError, schema, sessionFor } from "@/lib/database";
+import { AppError, collections, connect, databases, disconnect, documents, mutate, object, profileNames, publicError, query, schema, sessionFor } from "@/lib/database";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +41,7 @@ export async function POST(request: NextRequest) {
     if (input.action === "collections") return respond(await collections(session, input));
     if (input.action === "schema") return respond(await schema(session, input));
     if (input.action === "documents") return respond(await documents(session, input));
+    if (input.action === "query") return respond(await query(session, input));
     if (input.action === "update" || input.action === "delete") return respond(await mutate(session, input, input.action));
     throw new AppError("Unknown action.");
   } catch (error) {

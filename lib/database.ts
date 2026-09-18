@@ -25,6 +25,10 @@ export const collections = (s: Session, input: Record<string, unknown>) => s.bac
 export const schema = (s: Session, input: Record<string, unknown>) => s.backend === "postgresql" ? postgres.schema(s.session, input) : mongo.schema(s.session, input);
 export const documents = (s: Session, input: Record<string, unknown>) => s.backend === "postgresql" ? postgres.documents(s.session, input) : mongo.documents(s.session, input);
 export const mutate = (s: Session, input: Record<string, unknown>, action: "update" | "delete") => s.backend === "postgresql" ? postgres.mutate(s.session, input, action) : mongo.mutate(s.session, input, action);
+export function query(s: Session, input: Record<string, unknown>) {
+  if (s.backend !== "postgresql") throw new mongo.AppError("The SQL editor is available for PostgreSQL connections.");
+  return postgres.query(s.session, input);
+}
 export function publicError(error: unknown) {
   return postgres.publicError(error) ?? mongo.publicError(error);
 }

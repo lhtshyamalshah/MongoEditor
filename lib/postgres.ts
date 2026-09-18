@@ -2,11 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { AppError, object } from "./mongo";
 import { compileFilter, quoteIdentifier as qi, type PgColumn } from "./postgres-filter";
+import { prepareReadQuery } from "./sql-editor";
 
 type Input = Record<string, unknown>;
 type Row = Record<string, string | null>;
 type CacheEntry = { expires: number; pending: boolean; value: Promise<unknown> };
-type Session = { uri: string; database: string; touched: number; pools: Map<string, Pool>; databaseNames?: Promise<string[]>; metadata?: Map<string, CacheEntry> };
+type Session = { uri: string; database: string; touched: number; pools: Map<string, Pool>; databaseNames?: Promise<string[]>; metadata?: Map<string, CacheEntry>; queryRunning?: boolean };
 const TTL = 30 * 60_000;
 const METADATA_TTL = 60_000;
 
@@ -130,6 +131,54 @@ function readTableInfo(session: Session, pool: Pool, input: Input) {
 export async function schema(session: Session, input: Input) {
   const { columns, readOnly, reason } = await readTableInfo(session, await poolFor(session, input.database), input);
   return { columns, readOnly, reason };
+}
+export async function query(session: Session, input: Input) {
+  let prepared;
+  try { prepared = prepareReadQuery(input.sql, input.parameters ?? [], input.rowLimit); }
+  catch (error) { throw new AppError((error as Error).message); }
+  if (session.queryRunning) throw new AppError("A SQL query is already running for this connection.", 429);
+  session.queryRunning = true;
+  let client: PoolClient | undefined;
+  let reusable = false;
+  const started = Date.now();
+  try {
+    client = await (await poolFor(session, input.database)).connect();
+    await client.query("BEGIN READ ONLY");
+    await client.query("SET LOCAL statement_timeout = '5s'");
+    await client.query("SET LOCAL lock_timeout = '2s'");
+    await client.query("SET LOCAL max_parallel_workers_per_gather = 0");
+    await client.query("SET LOCAL standard_conforming_strings = on");
+    const result = await client.query<(string | null)[]>({ text: prepared.text, values: prepared.values, rowMode: "array", types: { getTypeParser: () => (value: string) => value } });
+    const rows: (string | null)[][] = [];
+    let bytes = 0;
+    for (const row of result.rows.slice(0, prepared.limit)) {
+      bytes += Buffer.byteLength(JSON.stringify(row));
+      if (bytes > 2_000_000) break;
+      rows.push(row);
+    }
+    const truncated = result.rows.length > rows.length;
+    return { columns: result.fields.map(field => ({ name: field.name, typeOid: field.dataTypeID })), rows, truncated, rowLimit: prepared.limit, durationMs: Date.now() - started, notice: bytes > 2_000_000 ? "Results exceed 2 MB. Select fewer or smaller columns." : truncated ? `Showing the first ${prepared.limit} rows. Narrow the query to see other results.` : "" };
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "25006") throw new AppError("The SQL editor is read-only. This query attempted to change data.", 403);
+    if (code === "42601") throw new AppError("SQL syntax error. Check the query and run one SELECT or WITH statement.");
+    if (code === "42P01") throw new AppError("A table or view was not found. Use its schema-qualified name from autocomplete.");
+    if (code === "42703") throw new AppError("A column was not found. Check the column suggestions and table aliases.");
+    if (code === "42P18" || code === "42804") throw new AppError("PostgreSQL could not infer a parameter type. Add a cast such as $1::uuid or $1::text.");
+    throw error;
+  } finally {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+        // SELECT can call functions that change session settings or acquire
+        // advisory locks. Do not leak those into later pooled operations.
+        await client.query("DISCARD ALL");
+        reusable = true;
+      } catch { /* Destroy the connection if cleanup fails. */ }
+      client.release(!reusable);
+    }
+    session.queryRunning = false;
+  }
 }
 function projection(columns: PgColumn[]) { return columns.map(column => `${qi(column.name)}::text AS ${qi(column.name)}`).join(", "); }
 export function wireRow(value: Row, keys: string[]) {

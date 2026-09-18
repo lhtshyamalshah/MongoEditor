@@ -53,6 +53,29 @@ Requires PostgreSQL 12 or newer; integration-tested with PostgreSQL 17.
 - Saving and deleting lock the selected row in a transaction and compare its current contents with the version opened in the browser. Concurrent changes produce a conflict. Deletion requires confirmation and targets exactly one primary key.
 - Connecting does not enumerate databases. **+** opens another database by name; optional discovery lists databases with CONNECT permission. A session can open up to five databases, with at most two pooled connections per database; idle connections close after 15 seconds. Queries time out after 5 seconds and lock waits after 2 seconds. Sessions expire after 30 minutes of inactivity.
 
+## PostgreSQL SQL editor
+
+After connecting to PostgreSQL, choose **SQL editor** beside **Browse tables**. The editor supports one read-only `SELECT` or `WITH ... SELECT` query per run, including joins and aggregate queries. SQL execution starts only when you click **Run query** or press **Ctrl/Command+Enter**. Switching between Browse and SQL keeps the current draft and parameters in memory; changing database/connection or reloading the page clears them.
+
+- Syntax highlighting, line numbers, undo/redo, bracket matching, and **Ctrl+Space** autocomplete are provided by CodeMirror. **Tab** accepts the highlighted suggestion. Suggestions include PostgreSQL keywords, schema/table names, aliases, and column names with SQL types. Suggestions use local metadata, with no external AI service or row sampling.
+- Only selected or `FROM`/`JOIN`-referenced tables load column metadata, debounced and capped at five tables per request cycle. The existing server metadata cache is reused. **Refresh suggestions** explicitly reloads those columns. Arbitrary SQL aliases and unusual query structures may require manually refreshing or selecting the relevant table.
+- Write `$1`, `$2`, etc. to show separate parameter inputs. Numbers must start at `$1` with no gaps (up to `$50`); repeated uses share an input. Parameters inside comments and quoted strings are ignored. Values are bound through the driver, never interpolated into SQL. Enter PostgreSQL text values, or check **NULL**. For ambiguous types, add an explicit cast such as `$1::uuid`, `$1::numeric`, or `$1::timestamptz`. **Parameterized example** creates an equality filter for the selected table's primary key or first column.
+- Each execution uses a PostgreSQL read-only transaction with a five-second statement timeout, a two-second lock timeout, and parallel query workers disabled. One console query runs per connection at a time. Writes, scripts, locking statements, and session-control commands are rejected. Execution uses the connected database role's permissions; the console is not an authentication or isolation layer for untrusted users.
+- Results are capped at 25, 100, or 500 rows (default 100), plus one lookahead row, and a 2 MB serialized row-data budget. The server applies the row cap even if your SQL has no `LIMIT`. There is no automatic count or query execution while typing. Aggregates, joins, unindexed filters, and complex views can still do substantial work before returning rows; the row limit is not a scan limit.
+- Results support table/JSON views and copying. Values remain PostgreSQL text to preserve numeric/timestamp precision; SQL NULL remains `null`. JSON uses separate column names and row arrays so duplicate result-column names are preserved. Result data is never automatically edited through the SQL console.
+
+Example:
+
+```sql
+SELECT id, status
+FROM public.your_table
+WHERE status = $1
+ORDER BY id
+LIMIT 100;
+```
+
+Enter the desired status in **Parameter $1**, then run. Replace `your_table` and column names with autocomplete suggestions from your database.
+
 ## MongoDB / DocumentDB browsing and editing
 
 - **Collection schema** shows field paths (including nested objects and arrays), detected BSON types, and presence counts from up to 100 documents. This is an inferred sample, not a guaranteed or enforced schema. It remains independent of the current search and can be refreshed.
