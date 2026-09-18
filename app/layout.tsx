@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Mongo Browser — Your data, in view",
-  description: "A local workspace to browse, search, and edit your MongoDB and Amazon DocumentDB collections.",
+  title: "Database Browser — Your data, in view",
+  description: "A local workspace to browse, search, and edit MongoDB, Amazon DocumentDB, and PostgreSQL databases.",
   robots: { index: false, follow: false }
 };
 

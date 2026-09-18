@@ -1,4 +1,5 @@
 node_modules/
+.mongoeditor/
 .npm-cache/
 .next/
 out/

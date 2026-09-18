@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, collections, connect, databases, disconnect, documents, mutate, object, profileNames, publicError, schema, sessionFor } from "@/lib/mongo";
+import { AppError, collections, connect, databases, disconnect, documents, mutate, object, profileNames, publicError, schema, sessionFor } from "@/lib/database";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
