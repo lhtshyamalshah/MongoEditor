@@ -5,8 +5,23 @@ import { compileFilter, quoteIdentifier as qi, type PgColumn } from "./postgres-
 
 type Input = Record<string, unknown>;
 type Row = Record<string, string | null>;
-type Session = { uri: string; database: string; touched: number; pools: Map<string, Pool>; databaseNames?: Promise<string[]> };
+type CacheEntry = { expires: number; pending: boolean; value: Promise<unknown> };
+type Session = { uri: string; database: string; touched: number; pools: Map<string, Pool>; databaseNames?: Promise<string[]>; metadata?: Map<string, CacheEntry> };
 const TTL = 30 * 60_000;
+const METADATA_TTL = 60_000;
+
+// Share pending catalog reads between the rows and schema panels. Cache only
+// metadata, never rows; mutations always validate fresh metadata under a lock.
+async function cachedMetadata<T>(session: Session, key: string, load: () => Promise<T>, refresh = false): Promise<T> {
+  const cache = session.metadata ??= new Map();
+  const existing = cache.get(key);
+  if (existing && (existing.pending || (!refresh && existing.expires > Date.now()))) return existing.value as Promise<T>;
+  if (cache.size >= 100) cache.delete(cache.keys().next().value!);
+  const entry: CacheEntry = { expires: 0, pending: true, value: Promise.resolve().then(load) };
+  cache.set(key, entry);
+  try { const value = await entry.value as T; entry.pending = false; entry.expires = Date.now() + METADATA_TTL; return value; }
+  catch (error) { if (cache.get(key) === entry) cache.delete(key); throw error; }
+}
 const globalStore = globalThis as typeof globalThis & { postgresBrowserSessions?: Map<string, Session>; postgresBrowserTimer?: ReturnType<typeof setInterval> };
 const sessions = globalStore.postgresBrowserSessions ??= new Map<string, Session>();
 if (!globalStore.postgresBrowserTimer) {
@@ -37,7 +52,7 @@ export function poolOptions(uri: string, database?: string) {
   try { url = new URL(uri); } catch { throw new AppError("Enter a valid PostgreSQL connection string."); }
   if (!["postgres:", "postgresql:"].includes(url.protocol)) throw new AppError("Enter a postgres:// or postgresql:// connection string.");
   if (database) { url.pathname = `/${encodeURIComponent(name(database, "database"))}`; url.searchParams.delete("database"); }
-  return { connectionString: url.toString(), max: 3, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000, statement_timeout: 10_000, lock_timeout: 5_000, idle_in_transaction_session_timeout: 15_000, application_name: "local-database-browser" };
+  return { connectionString: url.toString(), max: 2, idleTimeoutMillis: 15_000, connectionTimeoutMillis: 10_000, statement_timeout: 5_000, lock_timeout: 2_000, idle_in_transaction_session_timeout: 15_000, application_name: "local-database-browser" };
 }
 function newPool(uri: string, database?: string) {
   const pool = new Pool(poolOptions(uri, database));
@@ -84,29 +99,36 @@ export function relationName(value: unknown) {
   } catch { throw new AppError("Choose a valid user table."); }
 }
 export async function collections(session: Session, input: Input) {
-  const result = await (await poolFor(session, input.database)).query(`SELECT n.nspname, c.relname, c.relkind,
-    EXISTS (SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid) AS pk
-    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-    AND has_schema_privilege(n.oid, 'USAGE') AND has_table_privilege(c.oid, 'SELECT') ORDER BY n.nspname, c.relname`);
-  return { collections: result.rows.map(row => ({ name: JSON.stringify([row.nspname, row.relname]), label: `${qi(row.nspname)}.${qi(row.relname)}`, type: ["v", "m"].includes(row.relkind) ? "view" : "table", readOnly: !row.pk || !["r", "p"].includes(row.relkind) })) };
+  const pool = await poolFor(session, input.database);
+  return cachedMetadata(session, JSON.stringify([input.database, "tables"]), async () => {
+    const result = await pool.query(`SELECT n.nspname, c.relname, c.relkind, pg_catalog.pg_get_userbyid(c.relowner) AS owner,
+      EXISTS (SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid) AS pk
+      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      AND has_schema_privilege(n.oid, 'USAGE') AND has_table_privilege(c.oid, 'SELECT') ORDER BY n.nspname, c.relname`);
+    return { collections: result.rows.map(row => ({ name: JSON.stringify([row.nspname, row.relname]), label: `${qi(row.nspname)}.${qi(row.relname)}`, schema: row.nspname as string, table: row.relname as string, owner: row.owner as string, type: ["v", "m"].includes(row.relkind) ? "view" : "table", readOnly: !row.pk || !["r", "p"].includes(row.relkind) })) };
+  }, input.refresh === true);
 }
 async function tableInfo(client: Pool | PoolClient, collection: unknown) {
   const relation = relationName(collection);
   const result = await client.query(`SELECT a.attname AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS type,
     NOT a.attnotnull AS nullable, a.attgenerated <> '' AS generated, c.relkind,
-    EXISTS (SELECT 1 FROM pg_catalog.pg_index i, unnest(i.indkey) WITH ORDINALITY k(attnum, position)
-      WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid AND k.position <= i.indnkeyatts AND a.attnum = k.attnum) AS "primaryKey"
+    (SELECT k.position::int FROM pg_catalog.pg_index i, unnest(i.indkey) WITH ORDINALITY k(attnum, position)
+      WHERE i.indrelid = c.oid AND i.indisprimary AND i.indisvalid AND k.position <= i.indnkeyatts AND a.attnum = k.attnum) AS "keyPosition"
     FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, [relation.schema, relation.table]);
   if (!result.rows.length) throw new AppError("This table no longer exists or has no columns.", 404);
-  const columns = result.rows.map(({ name, type, nullable, generated, primaryKey }) => ({ name, type, nullable, generated, primaryKey })) as PgColumn[];
-  const primaryKeys = columns.filter(column => column.primaryKey).map(column => column.name);
+  const columns = result.rows.map(({ name, type, nullable, generated, keyPosition }) => ({ name, type, nullable, generated, primaryKey: keyPosition !== null })) as PgColumn[];
+  // Match the primary-key index order, which can differ from column order.
+  const primaryKeys = result.rows.filter(column => column.keyPosition !== null).sort((a, b) => a.keyPosition - b.keyPosition).map(column => column.name as string);
   const readOnly = !["r", "p"].includes(result.rows[0].relkind) || !primaryKeys.length;
   return { ...relation, columns, primaryKeys, readOnly, reason: readOnly ? "Views and tables without a primary key are read-only." : "" };
 }
+function readTableInfo(session: Session, pool: Pool, input: Input) {
+  return cachedMetadata(session, JSON.stringify([input.database, "schema", input.collection]), () => tableInfo(pool, input.collection), input.refresh === true);
+}
 export async function schema(session: Session, input: Input) {
-  const { columns, readOnly, reason } = await tableInfo(await poolFor(session, input.database), input.collection);
+  const { columns, readOnly, reason } = await readTableInfo(session, await poolFor(session, input.database), input);
   return { columns, readOnly, reason };
 }
 function projection(columns: PgColumn[]) { return columns.map(column => `${qi(column.name)}::text AS ${qi(column.name)}`).join(", "); }
@@ -115,7 +137,7 @@ export function wireRow(value: Row, keys: string[]) {
 }
 export async function documents(session: Session, input: Input) {
   const pool = await poolFor(session, input.database);
-  const table = await tableInfo(pool, input.collection);
+  const table = await readTableInfo(session, pool, input);
   const page = Number(input.page ?? 1), pageSize = Number(input.pageSize ?? 25);
   if (!Number.isSafeInteger(page) || page < 1 || page > 1_000_000 || ![10, 25, 50, 100].includes(pageSize)) throw new AppError("Invalid page or page size.");
   let filter = { sql: "TRUE", values: [] as unknown[] };
@@ -125,18 +147,33 @@ export async function documents(session: Session, input: Input) {
       filter = compileFilter(object(JSON.parse(input.query || "{}"), "Filter"), table.columns);
     } else if (typeof input.query === "string" && input.query.trim()) {
       if (input.query.length > 500) throw new Error("Text searches must be 500 characters or fewer.");
-      const fields = input.field ? table.columns.filter(column => column.name === input.field) : table.columns;
-      if (!fields.length) throw new Error("Choose an existing search column.");
-      const clauses = fields.map(column => compileFilter({ [column.name]: { $contains: input.query!.toString().trim() } }, table.columns));
-      filter = { sql: `(${clauses.map(clause => clause.sql).join(" OR ")})`, values: clauses[0].values };
+      if (typeof input.field !== "string" || !table.columns.some(column => column.name === input.field)) throw new Error("Choose a search column to avoid searching every column. Indexed JSON filters are preferable on large tables.");
+      filter = compileFilter({ [input.field]: { $contains: input.query.trim() } }, table.columns);
     }
   } catch (error) { throw new AppError(error instanceof SyntaxError ? "Enter a valid JSON filter." : (error as Error).message); }
-  const order = table.primaryKeys.length ? table.primaryKeys.map(key => `data.${qi(key)}`).join(", ") : table.columns.map(column => `data.${qi(column.name)}::text`).join(", ");
-  const [result, count] = await Promise.all([
-    pool.query(`SELECT ${projection(table.columns)} FROM ${table.sql} AS data WHERE ${filter.sql} ORDER BY ${order} LIMIT $${filter.values.length + 1} OFFSET $${filter.values.length + 2}`, [...filter.values, pageSize + 1, (page - 1) * pageSize]),
-    pool.query(`SELECT count(*)::text AS total FROM ${table.sql} WHERE ${filter.sql}`, filter.values).catch(() => null)
-  ]);
-  return { documents: result.rows.slice(0, pageSize).map(row => wireRow(row, table.primaryKeys)), total: count && Number.isSafeInteger(Number(count.rows[0].total)) ? Number(count.rows[0].total) : null, hasNext: result.rows.length > pageSize, fields: table.columns.map(column => column.name), readOnly: table.readOnly, page, pageSize };
+  const keyed = table.primaryKeys.length > 0;
+  if (!keyed && (page !== 1 || input.after != null)) throw new AppError("Tables without a primary key show one limited preview. Apply a filter to narrow the results.");
+  if (keyed && page > 1 && input.after == null) throw new AppError("Use the next-page cursor to continue browsing. Refresh to restart.");
+  if (input.after != null) {
+    const after = object(input.after, "Page cursor");
+    if (Object.keys(after).length !== table.primaryKeys.length || table.primaryKeys.some(key => !Object.hasOwn(after, key) || typeof after[key] !== "string")) throw new AppError("Invalid page cursor. Refresh to restart.");
+    const parameters = table.primaryKeys.map(key => { filter.values.push(after[key]); return `$${filter.values.length}`; });
+    filter.sql = `(${filter.sql}) AND (${table.primaryKeys.map(key => `data.${qi(key)}`).join(", ")}) > (${parameters.join(", ")})`;
+  }
+  const order = keyed ? ` ORDER BY ${table.primaryKeys.map(key => `data.${qi(key)}`).join(", ")}` : "";
+  // One bounded row query. Never count the whole table, sort all columns, or
+  // skip earlier pages. The extra row tells the UI whether Next is available.
+  let result;
+  try {
+    result = await pool.query(`SELECT ${projection(table.columns)} FROM ${table.sql} AS data WHERE ${filter.sql}${order} LIMIT $${filter.values.length + 1}`, [...filter.values, keyed ? pageSize + 1 : pageSize]);
+  } catch (error) {
+    // A schema change should be retryable without waiting for the cache TTL.
+    session.metadata?.delete(JSON.stringify([input.database, "schema", input.collection]));
+    throw error;
+  }
+  const rows = result.rows.slice(0, pageSize).map(row => wireRow(row, table.primaryKeys));
+  const hasNext = keyed && result.rows.length > pageSize;
+  return { documents: rows, total: null, hasNext, nextCursor: hasNext ? rows.at(-1)!.id : null, pagination: keyed ? "keyset" : "preview", notice: keyed ? "" : "Limited preview: this table or view has no primary key. Apply a filter to narrow the results. Rows are not sorted.", fields: table.columns.map(column => column.name), readOnly: table.readOnly, page, pageSize };
 }
 function parseRow(value: unknown, label: string): Input {
   if (typeof value !== "string" || value.length > 2_000_000) throw new AppError(`${label} must be JSON text under 2 MB.`);

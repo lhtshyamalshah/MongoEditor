@@ -34,7 +34,9 @@ test("database overrides preserve URI credentials and TLS settings", () => {
   assert.equal(decodeURIComponent(url.pathname), "/new db");
   assert.equal(url.password, "p%40ss");
   assert.equal(url.searchParams.get("sslmode"), "verify-full");
-  assert.equal(options.statement_timeout, 10_000);
+  assert.equal(options.statement_timeout, 5_000);
+  assert.equal(options.max, 2);
+  assert.equal(options.lock_timeout, 2_000);
 });
 test("row representation keeps numeric precision and composite identity separate", () => {
   const row = wireRow({ id: "9007199254740993", tenant: "a", amount: "1234567890.123456789", date: "2026-01-01 12:34:56.123456", json: '{"big":9007199254740993}' }, ["id", "tenant"]);

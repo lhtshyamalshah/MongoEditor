@@ -35,6 +35,9 @@ test("PostgreSQL integration: browsing, filters, lossless edits, conflicts and r
     await t.test("discovers schemas and declared columns, including empty tables", async () => {
       const listed = await pg.collections(session, input);
       assert.ok(listed.collections.some(item => item.name === input.collection && !item.readOnly));
+      const listedTable = listed.collections.find(item => item.name === input.collection)!;
+      assert.equal(listedTable.schema, namespace); assert.equal(listedTable.table, tableName);
+      assert.equal(typeof listedTable.owner, "string"); assert.ok(listedTable.owner.length > 0);
       assert.ok(listed.collections.some(item => item.name === JSON.stringify([namespace, "item_view"]) && item.readOnly));
       const schema = await pg.schema(session, input);
       assert.deepEqual(schema.columns.filter(c => c.primaryKey).map(c => c.name), ["tenant", "id"]);
@@ -45,24 +48,53 @@ test("PostgreSQL integration: browsing, filters, lossless edits, conflicts and r
     });
     await t.test("paginates in numeric primary-key order and preserves precise values", async () => {
       const first = await pg.documents(session, input);
-      assert.equal(first.total, 13); assert.equal(first.hasNext, true);
+      assert.equal(first.total, null); assert.equal(first.hasNext, true);
       assert.deepEqual(first.documents.map(row => row.value.id), Array.from({ length: 10 }, (_, i) => String(i + 1)));
       assert.equal(first.documents[0].value.amount, "12345678901234567890.123456789");
       assert.equal(first.documents[0].value.created, "2026-09-18 12:34:56.123456");
       assert.ok(first.documents[0].value.payload?.includes("9007199254740993"));
-      const second = await pg.documents(session, { ...input, page: 2 });
+      const second = await pg.documents(session, { ...input, page: 2, after: first.nextCursor });
       assert.equal(second.documents.length, 3); assert.equal(second.hasNext, false);
+      assert.deepEqual(second.documents.map(row => [row.value.tenant, row.value.id]), [["a", "11"], ["a", "12"], ["b", "1"]]);
+      await assert.rejects(pg.documents(session, { ...input, page: 2 }), /next-page cursor/);
+      await assert.rejects(pg.documents(session, { ...input, page: 2, after: { id: "10" } }), /Invalid page cursor/);
     });
     await t.test("searches literals, nulls, typed comparisons, and rejects injection", async () => {
       const literal = await pg.documents(session, { ...input, query: "50%_\\", field: "name" });
-      assert.equal(literal.total, 1);
-      const allColumns = await pg.documents(session, { ...input, query: "50%_\\" });
-      assert.equal(allColumns.total, 1);
+      assert.equal(literal.documents.length, 1);
+      await assert.rejects(pg.documents(session, { ...input, query: "50%_\\" }), /Choose a search column/);
       const filtered = await pg.documents(session, { ...input, mode: "json", query: JSON.stringify({ id: { $gte: "10" }, tenant: "a", optional: null }) });
-      assert.equal(filtered.total, 3);
+      assert.equal(filtered.documents.length, 3);
       const injection = await pg.documents(session, { ...input, mode: "json", query: JSON.stringify({ name: "'; DROP TABLE items; --" }) });
-      assert.equal(injection.total, 0);
+      assert.equal(injection.documents.length, 0);
       await assert.rejects(pg.documents(session, { ...input, mode: "json", query: '{"$where":"1=1"}' }), /Unknown column/);
+    });
+    await t.test("keyset order follows the index and survives deletion of the cursor row", async () => {
+      const name = "reverse_key";
+      await pool.query(`CREATE TABLE ${qi(namespace)}.${qi(name)} (id integer, tenant text, PRIMARY KEY (tenant, id))`);
+      await pool.query(`INSERT INTO ${qi(namespace)}.${qi(name)} SELECT n, 'a' FROM generate_series(1,25) n`);
+      const base = { ...input, collection: JSON.stringify([namespace, name]) };
+      const first = await pg.documents(session, base);
+      assert.deepEqual(Object.keys(first.nextCursor!), ["tenant", "id"]);
+      await pool.query(`DELETE FROM ${qi(namespace)}.${qi(name)} WHERE id=10`);
+      const second = await pg.documents(session, { ...base, page: 2, after: first.nextCursor });
+      assert.deepEqual(second.documents.map(row => row.value.id), Array.from({ length: 10 }, (_, i) => String(i + 11)));
+      const last = await pg.documents(session, { ...base, page: 3, after: second.nextCursor });
+      assert.equal(last.documents.length, 5); assert.equal(last.hasNext, false);
+      const filtered = await pg.documents(session, { ...base, mode: "json", query: '{"id":{"$gte":"12"}}' });
+      const filteredNext = await pg.documents(session, { ...base, mode: "json", query: '{"id":{"$gte":"12"}}', page: 2, after: filtered.nextCursor });
+      assert.deepEqual(filteredNext.documents.map(row => row.value.id), ["22", "23", "24", "25"]);
+    });
+    await t.test("keyless tables and views return limited previews without misleading Next", async () => {
+      await pool.query(`INSERT INTO ${qi(namespace)}.no_key SELECT 'row ' || n FROM generate_series(1,200) n`);
+      for (const collection of ["no_key", "item_view"]) {
+        const base = { ...input, collection: JSON.stringify([namespace, collection]) };
+        const result = await pg.documents(session, base);
+        assert.equal(result.documents.length, 10); assert.equal(result.total, null);
+        assert.equal(result.hasNext, false); assert.equal(result.nextCursor, null);
+        assert.equal(result.pagination, "preview"); assert.match(result.notice, /Limited preview/);
+        await assert.rejects(pg.documents(session, { ...base, page: 2 }), /limited preview/);
+      }
     });
     await t.test("updates only the composite key and preserves unmodified precise values", async () => {
       const row = (await pg.documents(session, input)).documents[0];
@@ -111,7 +143,7 @@ test("PostgreSQL integration: browsing, filters, lossless edits, conflicts and r
         assert.equal((await post("schema", input)).status, 200);
         assert.equal((await post("databases")).status, 200);
         const rows = await post("documents", { ...input, mode: "json", query: '{"tenant":"a","id":"2"}' });
-        assert.equal(rows.status, 200); assert.equal(rows.data.total, 1);
+        assert.equal(rows.status, 200); assert.equal(rows.data.total, null); assert.equal(rows.data.documents.length, 1);
         const row = rows.data.documents[0];
         const update = { ...input, id: JSON.stringify(row.id), revision: row.revision, document: JSON.stringify({ ...row.value, name: "HTTP edited" }) };
         assert.equal((await post("update", update)).status, 200);

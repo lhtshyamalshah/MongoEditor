@@ -6,7 +6,7 @@ import type { PgSchema } from "@/lib/postgres-filter";
 
 const operators = { $eq: "Equals", $ne: "Does not equal", $contains: "Contains text", $gt: "Greater than", $gte: "Greater than or equal", $lt: "Less than", $lte: "Less than or equal", null: "Is null", notNull: "Is not null" };
 
-export default function PostgresSchemaPanel({ token, database, collection, refresh, documentsBusy, onApply }: {
+export default function PostgresSchemaPanel({ token, database, collection, documentsBusy, onApply }: {
   token: string; database: string; collection: string; refresh: number; documentsBusy: boolean; onApply: (filter: Record<string, unknown>) => void;
 }) {
   const [schema, setSchema] = useState<PgSchema | null>(null);
@@ -22,13 +22,13 @@ export default function PostgresSchemaPanel({ token, database, collection, refre
     setLoading(true); setError("");
     fetch("/api/mongo", { method: "POST", signal: controller.signal,
       headers: { "Content-Type": "application/json", "X-Mongo-Browser": "1", "X-Connection-Token": token },
-      body: JSON.stringify({ action: "schema", database, collection })
+      body: JSON.stringify({ action: "schema", database, collection, refresh: reload > 0 })
     }).then(async response => { const result = await response.json(); if (!response.ok) throw new Error(result.error); return result as PgSchema; })
       .then(result => { if (!controller.signal.aborted) setSchema(result); })
       .catch(error => { if (!controller.signal.aborted) setError(error.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [token, database, collection, refresh, reload]);
+  }, [token, database, collection, reload]);
   const noValue = operator === "null" || operator === "notNull";
   const filter = { [selected]: { [noValue ? (operator === "null" ? "$eq" : "$ne") : operator]: noValue ? null : value } };
   return <details className="schema-panel" open>
