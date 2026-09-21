@@ -6,6 +6,7 @@ import type { PgSchema } from "@/lib/postgres-filter";
 import { quoteIdentifier } from "@/lib/postgres-filter";
 import { referencedTables, sqlParameters, type SqlTable } from "@/lib/sql-editor";
 import { completionNamespace } from "@/lib/sql-completions";
+import { toCsv } from "@/lib/sql-results";
 import SqlCodeEditor from "./sql-code-editor";
 
 type QueryResult = { columns: { name: string; typeOid: number }[]; rows: (string | null)[][]; truncated: boolean; rowLimit: number; durationMs: number; notice: string };
@@ -33,7 +34,7 @@ export default function SqlConsole({ token, database, tables, selected, active, 
   const [error, setError] = useState("");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [view, setView] = useState<"table" | "json">("table");
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"json" | "csv" | "">("");
   const [executedText, setExecutedText] = useState("");
   let numbers: number[] = [], parameterError = "";
   try { numbers = sqlParameters(text, true); } catch (error) { parameterError = (error as Error).message; }
@@ -74,7 +75,7 @@ export default function SqlConsole({ token, database, tables, selected, active, 
   const parameterIdentity = JSON.stringify([text, numbers.map(number => parameters[number] || { value: "", isNull: false }), rowLimit]);
   async function run() {
     if (!active || blocked || running.current || !text.trim() || parameterError) return;
-    running.current = true; setBusy(true); setError(""); setResult(null); setCopied(false);
+    running.current = true; setBusy(true); setError(""); setResult(null); setCopied("");
     const controller = new AbortController(); request.current = controller;
     try {
       const response = await fetch("/api/mongo", { method: "POST", signal: controller.signal,
@@ -85,6 +86,12 @@ export default function SqlConsole({ token, database, tables, selected, active, 
       if (!controller.signal.aborted) { setResult(data); setExecutedText(parameterIdentity); }
     } catch (error) { if (!controller.signal.aborted) setError((error as Error).message); }
     finally { running.current = false; if (!controller.signal.aborted) setBusy(false); }
+  }
+  async function copy(format: "json" | "csv") {
+    if (!result) return;
+    const names = result.columns.map(column => column.name);
+    try { await navigator.clipboard.writeText(format === "csv" ? toCsv(names, result.rows) : JSON.stringify({ columns: names, rows: result.rows }, null, 2)); setCopied(format); }
+    catch { setError("Clipboard access is unavailable."); }
   }
   function changeParameter(number: number, patch: Partial<{ value: string; isNull: boolean }>) {
     setParameters(current => ({ ...current, [number]: { ...(current[number] || { value: "", isNull: false }), ...patch } }));
@@ -101,7 +108,7 @@ export default function SqlConsole({ token, database, tables, selected, active, 
       {blocked && <p className="field-help" role="status">Another query tab is running. One query runs per connection at a time.</p>}
       {error && <div className="error" role="alert">{error}</div>}
     </div>
-    {result && <div className="sql-results"><div className="documents-toolbar"><div className="documents-title"><h3>Results</h3><span className="document-count">{result.rows.length} rows · {result.durationMs} ms</span></div><div className="button-group"><button className="button small secondary" onClick={() => setView(current => current === "table" ? "json" : "table")}>{view === "table" ? <Braces size={14} /> : <Table2 size={14} />}{view === "table" ? "JSON" : "Table"}</button><button className="button small secondary" onClick={async () => { try { await navigator.clipboard.writeText(JSON.stringify({ columns: result.columns.map(column => column.name), rows: result.rows }, null, 2)); setCopied(true); } catch { setError("Clipboard access is unavailable."); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "Copied" : "Copy results"}</button></div></div>
+    {result && <div className="sql-results"><div className="documents-toolbar"><div className="documents-title"><h3>Results</h3><span className="document-count">{result.rows.length} rows · {result.durationMs} ms</span></div><div className="button-group"><button className="button small secondary" onClick={() => setView(current => current === "table" ? "json" : "table")}>{view === "table" ? <Braces size={14} /> : <Table2 size={14} />}{view === "table" ? "JSON" : "Table"}</button><button className="button small secondary" onClick={() => void copy("csv")}>{copied === "csv" ? <Check size={14} /> : <Copy size={14} />}{copied === "csv" ? "Copied" : "Copy CSV"}</button><button className="button small secondary" onClick={() => void copy("json")}>{copied === "json" ? <Check size={14} /> : <Copy size={14} />}{copied === "json" ? "Copied" : "Copy JSON"}</button></div></div>
       {executedText !== parameterIdentity && <p className="sql-result-notice">Query or parameters changed. Run again to update these results.</p>}
       {result.notice && <p className="sql-result-notice" role="status">{result.notice}</p>}
       {view === "json" ? <pre className="sql-json-results">{JSON.stringify({ columns: result.columns.map(column => column.name), rows: result.rows }, null, 2)}</pre> : <div className="table-scroll sql-result-table"><table><thead><tr><th>#</th>{result.columns.map((column, index) => <th key={index}>{column.name}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}><td className="row-number">{index + 1}</td>{row.map((value, column) => <td key={column} className={value === null ? "null-value" : ""}><span title={value ?? "SQL NULL"}>{value === null ? "NULL" : value}</span></td>)}</tr>)}</tbody></table>{!result.rows.length && <p className="schema-empty">Query completed with no rows returned.</p>}</div>}
