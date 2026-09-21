@@ -1,0 +1,8 @@
+.next
+node_modules
+package-lock.json
+tsconfig.tsbuildinfo
+global-bundle.pem
+
+# Written as compact single-line rule blocks on purpose.
+app/globals.css

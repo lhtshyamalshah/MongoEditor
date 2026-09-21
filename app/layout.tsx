@@ -3,10 +3,17 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Database Browser — Your data, in view",
-  description: "A local workspace to browse, search, and edit MongoDB, Amazon DocumentDB, and PostgreSQL databases.",
-  robots: { index: false, follow: false }
+  description:
+    "A local workspace to browse, search, and edit MongoDB, Amazon DocumentDB, and PostgreSQL databases.",
+  robots: { index: false, follow: false },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
 }
