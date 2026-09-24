@@ -365,11 +365,12 @@ export function exactId(value: unknown) {
 }
 
 export function snapshotFilter(current: Document): Document {
+  // Comparing the whole document as one $expr fails on large documents, so
+  // match each top-level field and check the field count to catch added fields.
+  const fields = Object.keys(current);
   return {
-    $and: [
-      { _id: { $eq: current._id } },
-      { $expr: { $eq: ["$$ROOT", { $literal: current }] } },
-    ],
+    ...Object.fromEntries(fields.map((key) => [key, { $eq: current[key] }])),
+    $expr: { $eq: [{ $size: { $objectToArray: "$$ROOT" } }, fields.length] },
   };
 }
 
