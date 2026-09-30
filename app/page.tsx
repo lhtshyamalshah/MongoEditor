@@ -12,6 +12,8 @@ import SchemaPanel from "./schema-panel";
 import PostgresSchemaPanel from "./postgres-schema-panel";
 import DatabasePicker from "./database-picker";
 import PostgresTableList from "./postgres-table-list";
+import DocumentTree from "./document-tree";
+import { compactEjson } from "@/lib/extended-json";
 import {
   ArrowDown,
   ArrowLeft,
@@ -43,6 +45,10 @@ import {
 const SqlWorkspace = dynamic(() => import("./sql-workspace"), {
   ssr: false,
   loading: () => <p className="schema-empty">Loading SQL editor…</p>,
+});
+const JsonCodeEditor = dynamic(() => import("./json-code-editor"), {
+  ssr: false,
+  loading: () => <p className="schema-empty">Loading editor…</p>,
 });
 
 type JsonObject = Record<string, unknown>;
@@ -371,10 +377,11 @@ function DocumentEditor({
   onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(json(row.value));
+  const original = json(postgres ? row.value : compactEjson(row.value));
+  const [text, setText] = useState(original);
   const [localError, setLocalError] = useState("");
   const [copied, setCopied] = useState(false);
-  const dirty = text !== json(row.value);
+  const dirty = text !== original;
   function close() {
     if (!busy && (!dirty || window.confirm("Discard your unsaved changes?")))
       onClose();
@@ -396,7 +403,8 @@ function DocumentEditor({
         throw new Error("The document must be a JSON object.");
       if (
         !postgres &&
-        JSON.stringify(parsed._id) !== JSON.stringify(row.value._id)
+        JSON.stringify(parsed._id) !==
+          JSON.stringify(compactEjson(row.value._id))
       )
         throw new Error("The _id field cannot be changed or removed.");
       setLocalError("");
@@ -461,7 +469,9 @@ function DocumentEditor({
           )}
         </div>
       </div>
-      {editing ? (
+      {editing && !postgres ? (
+        <JsonCodeEditor value={text} onChange={setText} disabled={busy} />
+      ) : editing ? (
         <textarea
           className="document-textarea"
           aria-label="Document JSON"
@@ -472,13 +482,17 @@ function DocumentEditor({
         />
       ) : (
         <div className="document-preview">
-          <Highlight value={row.value} />
+          {postgres ? (
+            <Highlight value={row.value} />
+          ) : (
+            <DocumentTree value={row.value} />
+          )}
         </div>
       )}
       <p className="editor-hint">
         {postgres
           ? "Values use PostgreSQL text format to preserve precision: keep them as JSON strings, or null for SQL NULL. Keep all columns; primary keys and generated columns cannot change."
-          : "ObjectIds, dates, and numeric types use Extended JSON wrappers to preserve their types. The _id field is immutable."}
+          : "Numbers appear plain when that keeps their BSON type. ObjectIds, dates, whole-number doubles, and small Int64 values keep Extended JSON wrappers so saving never changes a type. The _id field is immutable."}
       </p>
       {(localError || error) && (
         <div className="error" role="alert">
