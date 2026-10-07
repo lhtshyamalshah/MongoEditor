@@ -6,6 +6,7 @@ import {
   EJSON,
   connectionOptions,
   exactId,
+  insert,
   mutate,
   parseDocument,
   publicError,
@@ -96,13 +97,17 @@ function fixture(
 ) {
   const writes: {
     action: string;
-    filter: Document;
+    filter?: Document;
     replacement?: Document;
     options?: Document;
   }[] = [];
   const collection = {
     collectionName: "items",
     findOne: async () => current,
+    insertOne: async (document: Document, options: Document) => {
+      writes.push({ action: "insert", replacement: document, options });
+      return { insertedId: document._id };
+    },
     replaceOne: async (
       filter: Document,
       replacement: Document,
@@ -224,6 +229,41 @@ test("deletion uses one exact snapshot; system collections and views cannot be w
     /read-only/,
   );
   assert.equal(view.writes.length, 0);
+});
+
+test("insert writes one Extended JSON document with majority write concern", async () => {
+  const f = fixture(null);
+  const result = await insert(f.session, {
+    ...f.input,
+    document: '{"name":"New","count":{"$numberLong":"5"}}',
+  });
+  assert.equal(result.inserted, true);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.writes[0].replacement?.name, "New");
+  assert.equal(f.writes[0].replacement?.count._bsontype, "Long");
+  assert.equal(f.writes[0].options?.writeConcern.w, "majority");
+});
+
+test("insert rejects invalid documents, views and system collections without writing", async () => {
+  const f = fixture(null);
+  await assert.rejects(
+    insert(f.session, { ...f.input, document: "[]" }),
+    AppError,
+  );
+  const view = fixture(null, 1, "view");
+  await assert.rejects(
+    insert(view.session, { ...view.input, document: "{}" }),
+    /read-only/,
+  );
+  await assert.rejects(
+    insert(view.session, {
+      ...view.input,
+      collection: "system.users",
+      document: "{}",
+    }),
+    /read-only/,
+  );
+  assert.equal(f.writes.length + view.writes.length, 0);
 });
 
 test("DocumentDB connections enable TLS and disable retryable writes", () => {

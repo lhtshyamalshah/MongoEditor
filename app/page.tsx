@@ -549,6 +549,75 @@ function DocumentEditor({
   );
 }
 
+function NewDocument({
+  busy,
+  error,
+  onClose,
+  onInsert,
+}: {
+  busy: boolean;
+  error: string;
+  onClose: () => void;
+  onInsert: (text: string) => void;
+}) {
+  const [text, setText] = useState("{\n  \n}");
+  const [localError, setLocalError] = useState("");
+  const dirty = text.replace(/\s/g, "") !== "{}";
+  function close() {
+    if (!busy && (!dirty || window.confirm("Discard this new document?")))
+      onClose();
+  }
+  function insert() {
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("The document must be a JSON object.");
+      setLocalError("");
+      onInsert(text);
+    } catch (error) {
+      setLocalError(
+        error instanceof SyntaxError
+          ? "The document contains invalid JSON."
+          : (error as Error).message,
+      );
+    }
+  }
+  return (
+    <Modal title="Add document" onClose={close} wide>
+      <div className="editor-tools">
+        <span className="eyebrow">MONGODB EXTENDED JSON</span>
+      </div>
+      <JsonCodeEditor value={text} onChange={setText} disabled={busy} />
+      <p className="editor-hint">
+        Leave out _id and MongoDB generates an ObjectId. Use Extended JSON
+        wrappers such as $oid, $date, and $numberLong to set BSON types.
+      </p>
+      {(localError || error) && (
+        <div className="error" role="alert">
+          {localError || error}
+        </div>
+      )}
+      <div className="form-actions">
+        <button className="button secondary" onClick={close} disabled={busy}>
+          Cancel
+        </button>
+        <button
+          className="button primary"
+          disabled={busy || !dirty}
+          onClick={insert}
+        >
+          {busy ? (
+            <LoaderCircle size={16} className="spin" />
+          ) : (
+            <Check size={16} />
+          )}
+          Insert document
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 export default function Home() {
   const [profiles, setProfiles] = useState<string[] | null>(null);
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -578,6 +647,7 @@ export default function Home() {
   const [view, setView] = useState<"table" | "json">("table");
   const [selected, setSelected] = useState<Row | null>(null);
   const [deleting, setDeleting] = useState<Row | null>(null);
+  const [adding, setAdding] = useState(false);
   const [mutationBusy, setMutationBusy] = useState(false);
   const [mutationError, setMutationError] = useState("");
   const [showConnection, setShowConnection] = useState(false);
@@ -767,6 +837,21 @@ export default function Home() {
       setToast(
         action === "update" ? "Record updated successfully" : "Record deleted",
       );
+      refreshRows();
+    } catch (error) {
+      setMutationError((error as Error).message);
+    } finally {
+      setMutationBusy(false);
+    }
+  }
+  async function insert(document: string) {
+    if (!connection) return;
+    setMutationBusy(true);
+    setMutationError("");
+    try {
+      await api("insert", { database, collection, document }, connection.token);
+      setAdding(false);
+      setToast("Document added");
       refreshRows();
     } catch (error) {
       setMutationError((error as Error).message);
@@ -1196,6 +1281,19 @@ export default function Home() {
                       )}
                     </div>
                     <div className="button-group">
+                      {!postgres && (
+                        <button
+                          className="button small secondary"
+                          disabled={readOnly}
+                          onClick={() => {
+                            setAdding(true);
+                            setMutationError("");
+                          }}
+                        >
+                          <Plus size={14} />
+                          Add document
+                        </button>
+                      )}
                       <div
                         className="view-switch"
                         aria-label={postgres ? "Row view" : "Document view"}
@@ -1651,6 +1749,17 @@ export default function Home() {
           }}
         />
       )}
+      {adding && (
+        <NewDocument
+          busy={mutationBusy}
+          error={mutationError}
+          onClose={() => {
+            setAdding(false);
+            setMutationError("");
+          }}
+          onInsert={insert}
+        />
+      )}
       {deleting && (
         <Modal
           title={postgres ? "Delete this row?" : "Delete this document?"}
@@ -1778,6 +1887,8 @@ export default function Home() {
                   document. Keep Extended JSON wrappers such as $oid, $date, and
                   $numberLong to preserve types. Save replaces the full
                   document, so removing a field removes it from the database.
+                  Add document inserts a new one; leave out _id and MongoDB
+                  generates it.
                 </p>
                 <p>
                   <strong>5. Delete.</strong> The trash button deletes a single

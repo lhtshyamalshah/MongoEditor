@@ -72,6 +72,13 @@ export const mutate = (
   s.backend === "postgresql"
     ? postgres.mutate(s.session, input, action)
     : mongo.mutate(s.session, input, action);
+export function insert(s: Session, input: Record<string, unknown>) {
+  if (s.backend === "postgresql")
+    throw new mongo.AppError(
+      "Adding records is available for MongoDB connections.",
+    );
+  return mongo.insert(s.session, input);
+}
 export function query(s: Session, input: Record<string, unknown>) {
   if (s.backend !== "postgresql")
     throw new mongo.AppError(

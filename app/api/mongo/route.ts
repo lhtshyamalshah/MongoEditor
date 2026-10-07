@@ -6,6 +6,7 @@ import {
   databases,
   disconnect,
   documents,
+  insert,
   mutate,
   object,
   profileNames,
@@ -88,6 +89,7 @@ export async function POST(request: NextRequest) {
     if (input.action === "documents")
       return respond(await documents(session, input));
     if (input.action === "query") return respond(await query(session, input));
+    if (input.action === "insert") return respond(await insert(session, input));
     if (input.action === "update" || input.action === "delete")
       return respond(await mutate(session, input, input.action));
     throw new AppError("Unknown action.");

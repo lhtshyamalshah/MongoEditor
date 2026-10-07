@@ -374,11 +374,7 @@ export function snapshotFilter(current: Document): Document {
   };
 }
 
-export async function mutate(
-  session: Session,
-  input: Document,
-  action: "update" | "delete",
-) {
+async function writableCollection(session: Session, input: Document) {
   const collection = collectionFor(session, input);
   if (input.collection.startsWith("system."))
     throw new AppError("System collections are read-only.", 403);
@@ -388,6 +384,30 @@ export async function mutate(
     .next();
   if (!info) throw new AppError("This collection no longer exists.", 404);
   if (info.type === "view") throw new AppError("Views are read-only.", 403);
+  return collection;
+}
+
+/**
+ * Insert one Extended JSON document. MongoDB generates an ObjectId when _id is left out.
+ * @returns the stored document, including its _id
+ */
+export async function insert(session: Session, input: Document) {
+  const collection = await writableCollection(session, input);
+  const document = parseDocument(input.document, "Document");
+  // The driver adds the generated _id to `document` in place.
+  await collection.insertOne(document, {
+    writeConcern: { w: "majority", wtimeoutMS: MAX_TIME },
+  });
+  session.fields.delete(`${input.database}\0${input.collection}`);
+  return { inserted: true, document: wireDocument(document) };
+}
+
+export async function mutate(
+  session: Session,
+  input: Document,
+  action: "update" | "delete",
+) {
+  const collection = await writableCollection(session, input);
   const current = await collection.findOne(exactId(input.id), {
     maxTimeMS: MAX_TIME,
     readPreference: "primary",

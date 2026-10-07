@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 
-const base = process.env.CHECK_HTTP_BASE || "http://127.0.0.1:3000";
+process.loadEnvFile(".env");
+const base =
+  process.env.CHECK_HTTP_BASE ||
+  `http://127.0.0.1:${process.env.PORT || 3000}`;
 async function post(
   action: string,
   data: object = {},
